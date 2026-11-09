@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Firebase クラウド変数 同期テスト</title>
+<style>
+body{font-family:system-ui,"Noto Sans JP",sans-serif;background:#f3f6fb;color:#172033;margin:0}
+main{max-width:850px;margin:28px auto;padding:0 16px 40px}
+section{background:white;border:1px solid #dce3ef;border-radius:12px;padding:18px;margin:14px 0}
+h1{font-size:1.5rem}h2{font-size:1.05rem;margin-top:0}
+label{display:block;font-weight:650;margin:12px 0 6px}
+input{box-sizing:border-box;width:100%;padding:10px;border:1px solid #c7d1e0;border-radius:7px;font:inherit}
+button{border:0;border-radius:7px;padding:10px 14px;background:#175dcc;color:white;font:inherit;font-weight:650;cursor:pointer;margin:10px 6px 0 0}
+button.secondary{background:#e8eef8;color:#213653}button.danger{background:#b42335}button:disabled{opacity:.5}
+#status{font-weight:700;padding:4px 9px;border-radius:20px;background:#fff0cf;color:#805000}
+#status.ok{background:#ddf7e8;color:#17663a}#status.bad{background:#ffe2e2;color:#9c1c1c}
+.hint{color:#59677d;font-size:.88rem;line-height:1.6}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+#variables{list-style:none;padding:0}#variables li{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid #edf0f5;overflow-wrap:anywhere}
+#variables code{white-space:pre-wrap;overflow-wrap:anywhere}
+#log{background:#111827;color:#d9e5f7;border-radius:8px;padding:12px;min-height:90px;max-height:220px;overflow:auto;white-space:pre-wrap;font:12px/1.55 monospace}
+@media(max-width:600px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body><main>
+<h1>Firebase クラウド変数 同期テスト</h1>
+<p class="hint">Firebase Realtime Databaseへの接続、変数の保存・削除、別端末とのリアルタイム同期を確認する単独テストページです。</p>
+<section><h2>1. 接続状態</h2><p>状態： <span id="status">初期化中…</span></p><p id="userInfo" class="hint">匿名認証を準備しています。</p></section>
+<section><h2>2. ルームに接続</h2>
+<label for="roomId">ルームID</label><input id="roomId" maxlength="80" value="test-room-1" autocomplete="off">
+<button id="connectBtn" disabled>このルームに接続</button><button id="disconnectBtn" class="secondary" disabled>切断</button>
+<p class="hint">同期するすべての端末で同じルームIDを指定してください。半角英数字・ハイフン・アンダースコアを推奨します。</p></section>
+<section><h2>3. 変数を送信・削除</h2><div class="grid"><div><label for="varName">変数名</label><input id="varName" maxlength="80" placeholder="例: score"></div><div><label for="varValue">値（文字列）</label><input id="varValue" maxlength="1000" placeholder="例: 123"></div></div>
+<button id="sendBtn" disabled>送信・保存</button><button id="deleteBtn" class="danger" disabled>この変数を削除</button>
+<p class="hint">値は文字列として保存します（最大1000文字）。</p></section>
+<section><h2>4. 受信した変数一覧</h2><p class="hint">別端末からの変更も自動反映されます。</p><ul id="variables"><li class="hint">ルームに接続すると一覧が表示されます。</li></ul></section>
+<section><h2>5. ログ</h2><div id="log" aria-live="polite"></div><button id="clearLogBtn" class="secondary">ログを消去</button></section>
+<p class="hint">注意：匿名認証は誰でも利用できるため、ルームIDを知っている第三者もアクセスできる可能性があります。重要な情報は入力しないでください。このページは接続テスト専用です。</p>
+</main>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-app.js";
+import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-auth.js";
+import { getDatabase, ref, set, remove, onValue } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-database.js";
+
+const firebaseConfig={
+ apiKey:"AIzaSyA1yMtjlT_uLM0VlzQfmXLXULa2jO-NBE",
+ authDomain:"turbowarp-cloud.firebaseapp.com",
+ databaseURL:"https://turbowarp-cloud-default-rtdb.asia-southeast1.firebasedatabase.app",
+ projectId:"turbowarp-cloud",
+ storageBucket:"turbowarp-cloud.firebasestorage.app",
+ messagingSenderId:"909643967329",
+ appId:"1:909643967329:web:925c1e782f4c6e7ab1f320",
+ measurementId:"G-HB7S7JNN05"
+};
+const $=id=>document.getElementById(id);
+let auth,db,user=null,room=null,stopListener=null;
+function log(s,isError=false){$("log").textContent+=`[${new Date().toLocaleTimeString("ja-JP")}] ${s}\n`;$("log").scrollTop=$("log").scrollHeight;if(isError)console.error(s);}
+function status(s,kind=""){$("status").textContent=s;$("status").className=kind;}
+function buttons(){const connected=!!room;$("connectBtn").disabled=!user;$("disconnectBtn").disabled=!connected;$("sendBtn").disabled=!connected;$("deleteBtn").disabled=!connected;}
+function render(data){
+ $("variables").replaceChildren();
+ const entries=Object.entries(data||{}).sort(([a],[b])=>a.localeCompare(b));
+ if(!entries.length){const li=document.createElement("li");li.className="hint";li.textContent="変数はまだありません。";$("variables").append(li);return;}
+ for(const [key,value] of entries){const li=document.createElement("li"),name=document.createElement("strong"),val=document.createElement("code");name.textContent=key;val.textContent=String(value);li.append(name,val);$("variables").append(li);}
+}
+function disconnect(){if(stopListener)stopListener();stopListener=null;room=null;render({});buttons();status(user?"認証済み・未接続":"未認証",user?"ok":"");log("ルームから切断しました。");}
+async function connect(){
+ if(!user)return;
+ const id=$("roomId").value.trim();
+ if(!/^[A-Za-z0-9_-]{1,80}$/.test(id)){alert("ルームIDは半角英数字・ハイフン・アンダースコアのみ、1～80文字で入力してください。");return;}
+ disconnect();room=id;buttons();status(`「${id}」に接続中…`);log(`ルーム「${id}」に接続します。`);
+ stopListener=onValue(ref(db,`testRooms/${id}/variables`),snap=>{render(snap.val()||{});status(`接続中：${room}`,"ok");log(`データ受信（${Object.keys(snap.val()||{}).length}件）`);},err=>{status("受信エラー","bad");log("受信エラー: "+err.message,true);});
+}
+function validName(name){return name.length>0&&name.length<=80&&!/[.#$\[\]/]/.test(name);}
+async function send(){
+ if(!room)return;const name=$("varName").value.trim(),value=$("varValue").value;
+ if(!validName(name)){alert("変数名は1～80文字で、. # $ [ ] / を含めないでください。");return;}
+ if(value.length>1000){alert("値は1000文字以内にしてください。");return;}
+ try{await set(ref(db,`testRooms/${room}/variables/${name}`),value);log(`保存しました：${name} = ${JSON.stringify(value)}`);}
+ catch(e){status("保存エラー","bad");log("保存エラー: "+e.message,true);}
+}
+async function del(){
+ if(!room)return;const name=$("varName").value.trim();
+ if(!validName(name)){alert("削除する変数名を正しく入力してください。");return;}
+ try{await remove(ref(db,`testRooms/${room}/variables/${name}`));log(`削除しました：${name}`);}
+ catch(e){status("削除エラー","bad");log("削除エラー: "+e.message,true);}
+}
+$("connectBtn").addEventListener("click",connect);
+$("disconnectBtn").addEventListener("click",disconnect);
+$("sendBtn").addEventListener("click",send);
+$("deleteBtn").addEventListener("click",del);
+$("clearLogBtn").addEventListener("click",()=>$("log").textContent="");
+try{
+ const app=initializeApp(firebaseConfig);auth=getAuth(app);db=getDatabase(app);
+ status("匿名認証中…");log("Firebaseを初期化しました。");
+ signInAnonymously(auth).catch(e=>{status("認証エラー","bad");$("userInfo").textContent=e.message;log("匿名認証エラー: "+e.message,true);});
+ onAuthStateChanged(auth,u=>{user=u;if(u){$("userInfo").textContent="匿名認証済み（UID: "+u.uid+"）";status("認証済み・未接続","ok");log("匿名認証に成功しました。");}else{$("userInfo").textContent="未ログイン";status("未認証","bad");}buttons();});
+}catch(e){status("初期化エラー","bad");$("userInfo").textContent=e.message;log("初期化エラー: "+e.message,true);}
+</script></body></html>
