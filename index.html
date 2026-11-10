@@ -2941,20 +2941,43 @@ function closeCloudConnection() {
 }
 
 function createFirebaseCloudProvider(projectId, variablesRef, databaseModule) {
-    const {ref, set, remove} = databaseModule;
+    const {ref, runTransaction, remove} = databaseModule;
     const writeVariable = async (name, value) => {
         const cloudName = String(name).startsWith("☁ ") ? String(name) : `☁ ${name}`;
         const key = encodeCloudVariableName(cloudName);
         const stringValue = String(value);
 
-        // Firebaseのキーにできない文字はエンコード済みのキーに格納する。
+        // 同じ変数への同時書き込みをRTDBトランザクションで直列化する。
+        // revisionはサーバー上で確定した更新順を追跡するための番号。
         cloudLocalWrites.set(key, stringValue);
         try {
-            await set(ref(firebaseDatabaseInstance, `${variablesRef}/${key}`), stringValue);
+            const result = await runTransaction(
+                ref(firebaseDatabaseInstance, `${variablesRef}/${key}`),
+                current => {
+                    const currentValue = typeof current === "string"
+                        ? current
+                        : (current && typeof current.value === "string" ? current.value : null);
+                    if (currentValue === stringValue) return;
+                    const currentRevision = current && typeof current === "object"
+                        ? Number(current.revision) || 0
+                        : 0;
+                    return {
+                        value: stringValue,
+                        revision: currentRevision + 1,
+                        writerUid: firebaseUser ? firebaseUser.uid : "",
+                        updatedAt: Date.now()
+                    };
+                },
+                {applyLocally: false}
+            );
+
+            if (!result.committed) {
+                cloudLocalWrites.delete(key);
+            }
         } catch (error) {
             cloudLocalWrites.delete(key);
             setCloudStatus(`Firebaseへの保存に失敗しました: ${error.message}`);
-            console.error("[Firebase Cloud] write failed:", error);
+            console.error("[Firebase Cloud] transaction failed:", error);
         }
     };
 
@@ -3016,6 +3039,7 @@ async function connectCloudServer(projectId) {
         if (!currentProjectId || String(currentProjectId) !== project) return;
 
         const {ref, onValue} = databaseModule;
+        setCloudStatus(`Firebase認証済み（UID: ${firebaseUser.uid}）。アクセス権を確認しています...`);
         const roomPath = `testRooms/${project}/variables`;
         const variablesRef = ref(firebaseDatabaseInstance, roomPath);
         cloudProvider = createFirebaseCloudProvider(project, roomPath, databaseModule);
@@ -3028,13 +3052,13 @@ async function connectCloudServer(projectId) {
             snapshot => {
                 if (String(cloudConnectedProjectId) !== project) return;
                 if (snapshot.val() === true) {
-                    setCloudStatus(`Firebase接続中（プロジェクト ${project}）`);
+                    setCloudStatus(`Firebase接続中（プロジェクト ${project}） / UID: ${firebaseUser.uid}`);
                 } else {
                     setCloudStatus("Firebaseとの接続が一時的に切れています。再接続を待っています...");
                 }
             },
             error => {
-                setCloudStatus(`接続状態の取得エラー: ${error.message}`);
+                setCloudStatus(`接続状態の取得エラー（UID: ${firebaseUser.uid}）: ${error.message}`);
             }
         );
 
@@ -3045,8 +3069,11 @@ async function connectCloudServer(projectId) {
                 if (String(cloudConnectedProjectId) !== project) return;
                 const data = snapshot.val() || {};
                 for (const [key, rawValue] of Object.entries(data)) {
-                    if (typeof rawValue !== "string") continue;
-                    const value = String(rawValue);
+                    // 新形式（値・更新番号・書き込みUID）と旧形式の文字列を両方読み取る。
+                    const value = typeof rawValue === "string"
+                        ? rawValue
+                        : (rawValue && typeof rawValue.value === "string" ? rawValue.value : null);
+                    if (value === null) continue;
                     const localValue = cloudLocalWrites.get(key);
                     if (localValue !== undefined && localValue === value) {
                         cloudLocalWrites.delete(key);
@@ -3064,12 +3091,12 @@ async function connectCloudServer(projectId) {
                 }
             },
             error => {
-                setCloudStatus(`Firebaseデータ受信エラー: ${error.message}`);
+                setCloudStatus(`Firebaseデータ受信エラー（UID: ${firebaseUser.uid}）: ${error.message}`);
                 console.error("[Firebase Cloud] listener error:", error);
             }
         );
 
-        setCloudStatus(`Firebase認証済み。プロジェクト ${project} の同期を開始しました。`);
+        setCloudStatus(`Firebase認証済み。プロジェクト ${project} の同期を開始しました。 / UID: ${firebaseUser.uid}`);
         console.log(`[Firebase Cloud] connected: ${project}, uid=${firebaseUser && firebaseUser.uid}`);
     } catch (error) {
         closeCloudConnection();
