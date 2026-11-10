@@ -2897,10 +2897,8 @@ function decodeCloudVariableName(key) {
 }
 
 async function ensureFirebaseReady() {
-    if (firebaseUser && firebaseAuthInstance && firebaseDatabaseInstance) {
-        return;
-    }
-
+    // 初期化済みの場合でもdatabaseModuleを返せるよう、
+    // モジュールの取得を早期returnより先に行う。
     if (!firebaseModulesPromise) {
         firebaseModulesPromise = Promise.all([
             import("https://www.gstatic.com/firebasejs/13.1.0/firebase-app.js"),
