@@ -2615,6 +2615,27 @@ function stopProject() {
 
 
 /* ============================================================
+   外部プロジェクトダウンロードサーバー
+   Cloudflare Workersへデプロイ後、URLを書き換えてください。
+   ============================================================ */
+
+const PROJECT_DOWNLOAD_SERVER_URL =
+    "https://still-firefly-1151.g17005162.workers.dev";
+
+function getProjectDownloadServerURL() {
+    const url = String(PROJECT_DOWNLOAD_SERVER_URL || "").trim().replace(/\/$/, "");
+
+    if (!url || url.includes("YOUR-WORKER-NAME") || url.includes("YOUR-SUBDOMAIN")) {
+        throw new Error(
+            "ダウンロードサーバーURLが未設定です。HTML内のPROJECT_DOWNLOAD_SERVER_URLを設定してください。"
+        );
+    }
+
+    return url;
+}
+
+
+/* ============================================================
    メタデータ取得
    ============================================================ */
 
@@ -2622,9 +2643,11 @@ async function getProjectMetadata(
     projectId
 ) {
 
+    const serverURL = getProjectDownloadServerURL();
+
     const response =
         await fetch(
-            `https://trampoline.turbowarp.org/api/projects/${projectId}`
+            `${serverURL}/api/projects/${encodeURIComponent(projectId)}`
         );
 
 
@@ -2641,8 +2664,16 @@ async function getProjectMetadata(
 
     if (!response.ok) {
 
+        let detail = "";
+        try {
+            const errorData = await response.json();
+            detail = errorData.error ? `: ${errorData.error}` : "";
+        } catch (_) {
+            // JSON以外のエラー応答はHTTPステータスだけ表示する。
+        }
+
         throw new Error(
-            `プロジェクト情報の取得に失敗しました。HTTP ${response.status}`
+            `ダウンロードサーバーでプロジェクト情報を取得できませんでした。HTTP ${response.status}${detail}`
         );
 
     }
@@ -2662,29 +2693,28 @@ async function getProjectData(
     metadata
 ) {
 
-    const token =
-        metadata.project_token;
-
-
-    if (!token) {
-
-        throw new Error(
-            "project_tokenを取得できませんでした。"
-        );
-
-    }
-
+    // SB3本体の取得はブラウザではなく外部サーバーに任せる。
+    // metadata引数は既存の呼び出しとの互換性のため残している。
+    const serverURL = getProjectDownloadServerURL();
 
     const response =
         await fetch(
-            `https://projects.scratch.mit.edu/${projectId}?token=${token}`
+            `${serverURL}/api/projects/${encodeURIComponent(projectId)}/data`
         );
 
 
     if (!response.ok) {
 
+        let detail = "";
+        try {
+            const errorData = await response.clone().json();
+            detail = errorData.error ? `: ${errorData.error}` : "";
+        } catch (_) {
+            // バイナリ/テキスト応答の場合はHTTPステータスだけ表示する。
+        }
+
         throw new Error(
-            `SB3の取得に失敗しました。HTTP ${response.status}`
+            `ダウンロードサーバーからSB3を取得できませんでした。HTTP ${response.status}${detail}`
         );
 
     }
